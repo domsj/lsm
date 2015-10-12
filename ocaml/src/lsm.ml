@@ -8,14 +8,13 @@ type key = bytes
  *)
 type raw_value = bytes
 
-type range = key * key (* [ first_inclusive, last_exclusive [ *)
+open Message
 
-(* TODO
- * - range operators
- *)
+type range = key * key option (* [ first_inclusive, last_exclusive [ *)
+
 type operation =
   | Single of key * raw_value
-  (* | DeleteRange of range *)
+  (* | TODO Range of range * raw_value *)
 
 
 (* TODO
