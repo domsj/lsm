@@ -1,3 +1,4 @@
 true: debug
 true: annot
+true: package(ppx_deriving.show)
 "src":include

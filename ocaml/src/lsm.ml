@@ -1,35 +1,7 @@
-type key = bytes
+type key = Lsm_batch.key
 type message = Lsm_message.t
 type value = Lsm_message.value
-
-type range = key * key option (* [ first_inclusive, last_exclusive [ *)
-
-type operation =
-  | Single of key * message
-  (* | TODO Range of range * message *)
-
-
-(* TODO
- * - what are semantics related to ordering inside the batch?
- *)
-type batch = operation list
-
-type counter = int64
-
-class type wal =
-  object
-    method append : counter -> batch -> unit
-    method iterate_from : counter -> (counter -> batch -> unit) -> unit
-    method discard_until : counter -> unit
-  end
-
-class no_wal =
-  (object
-      method append cnt batch = ()
-      method iterate_from cnt f = ()
-      method discard_until cnt = ()
-    end : wal)
-
+type batch = Lsm_batch.t [@@deriving show]
 
 (* type direction = *)
 (*   | LE (\* less than or equal *\) *)
@@ -91,24 +63,32 @@ class map_memtable max_size =
         if frozen
         then raise Immutable_memtable;
 
-        List.iter
+        Array.iter
           (function
-            | Single (key, message) ->
+            | Lsm_batch.Single (key, message) ->
                let map' = match self # get key with
-               | None -> StringMap.add key message map
-               | Some m ->
-                  begin
-                    match m # merge_to_message [ message ] false with
-                    | None, _ -> StringMap.remove key map
-                    | Some m, _ -> StringMap.add key m map
-                  end
+                 | None ->
+                    StringMap.add key message map
+                 | Some m ->
+                    begin
+                      (* TODO proper is_final *)
+                      let is_final = false in
+                      match message # merge_to_message
+                                    [ m ]
+                                    is_final with
+                      | None, _ ->
+                         StringMap.remove key map
+                      | Some m_res, _ ->
+                         StringMap.add key m_res map
+                    end
                in
                map <- map')
           batch;
-        size <- size + List.length batch
+        (* TODO use a better metric for size *)
+        size <- size + Array.length batch
 
       method maybe_apply batch =
-        if size + (List.length batch) > max_size
+        if size + (Array.length batch) > max_size
         then false
         else
           begin
@@ -193,7 +173,7 @@ want cached (precomputed) view based on sstable_tree
 
 
 type manifest = {
-    next_counter : counter;
+    next_counter : int64;
     sstables : sstable_tree;
   }
 
@@ -225,14 +205,43 @@ class type lsm_type =
     (* TODO allow making snapshots etc *)
   end
 
-class lsm
-        (manifest_store : manifest_store)
-        (wal : wal)
-        (make_memtable : unit -> memtable)
-  =
-  (object(self)
-      val mutable active_memtable = make_memtable ()
-      val mutable frozen_memtables = []
+module Lsm =
+  struct
+    type t = {
+        manifest_store : manifest_store;
+        wal : Lsm_wal.wal;
+        make_memtable : (batch -> memtable);
+        mutable next_counter : int64;
+        mutable active_memtable : memtable;
+        mutable frozen_memtables : memtable list;
+      }
+
+    let apply_no_wal t batch =
+      if not (t.active_memtable # maybe_apply batch)
+      then
+        begin
+          t.active_memtable # freeze;
+          t.frozen_memtables <-
+            t.active_memtable :: t.frozen_memtables;
+          t.active_memtable <- t.make_memtable batch
+        end
+
+    let make manifest_store wal make_memtable =
+      let manifest = manifest_store # get in
+      let t =
+        { manifest_store;
+          wal;
+          make_memtable;
+          next_counter = manifest.next_counter;
+          active_memtable = make_memtable [||];
+          frozen_memtables = []; }
+      in
+      wal # iterate_from manifest.next_counter
+          (fun cnt batch ->
+           assert (cnt = t.next_counter);
+           apply_no_wal t batch;
+           t.next_counter <- Int64.succ cnt);
+      t
 
       (* TODO background threads
        * - to schedule compaction
@@ -241,61 +250,58 @@ class lsm
        *   (free memtable + update manifest)
        *)
 
-      method apply batch =
-        if not (active_memtable # maybe_apply batch)
-        then
-          begin
-            active_memtable # freeze;
-            frozen_memtables <- active_memtable :: frozen_memtables;
-            active_memtable <- make_memtable ();
-            active_memtable # force_apply batch
-          end
+    let apply t batch =
+      (* TODO do this while holding a (lwt)lock *)
+      t.wal # append t.next_counter batch;
+      t.next_counter <- Int64.succ t.next_counter;
+      apply_no_wal t batch
 
-      method set key value =
-        self # apply
-             [ let open Lsm_message in
-               Single (key, new set value); ]
+    let set t key value =
+      apply t
+            [| let open Lsm_message in
+               let open Lsm_batch in
+               Single (key, new set value); |]
 
-      method delete key =
-        self # apply
-             [ let open Lsm_message in
-               Single (key, new delete); ]
+    let delete t key =
+      apply t
+            [| let open Lsm_message in
+               let open Lsm_batch in
+               Single (key, new delete); |]
 
-      method get key : value option =
-        let get_next_message_from_sstable_tree =
-          get_next_message_from_sstable_tree
-            (manifest_store # get).sstables
-            key
-        in
-        let get_next_memtable =
-          let memtables =
-            ref (active_memtable :: frozen_memtables) in
-          fun () ->
-          match !memtables with
-          | [] -> None
-          | t :: ts ->
-             memtables := ts;
-             Some t
-        in
-        let rec get_next_message_from_memtable () =
-          match get_next_memtable () with
-          | None -> None
-          | Some memtable ->
-             begin
-               match memtable # get key with
-               | None -> get_next_message_from_memtable ()
-               | (Some _) as mo -> mo
-             end
-        in
-        let get_next () =
-          match get_next_message_from_memtable () with
-          | None -> get_next_message_from_sstable_tree ()
-          | (Some _) as mo -> mo
-        in
-        match get_next () with
-        | None ->
-           None
-        | Some m ->
-           m # merge_to_value ~get_next
-
-    end : lsm_type)
+    let get t key : value option =
+      let get_next_message_from_sstable_tree =
+        get_next_message_from_sstable_tree
+          (t.manifest_store # get).sstables
+          key
+      in
+      let get_next_memtable =
+        let memtables =
+          ref (t.active_memtable :: t.frozen_memtables) in
+        fun () ->
+        match !memtables with
+        | [] -> None
+        | t :: ts ->
+           memtables := ts;
+           Some t
+      in
+      let rec get_next_message_from_memtable () =
+        match get_next_memtable () with
+        | None -> None
+        | Some memtable ->
+           begin
+             match memtable # get key with
+             | None -> get_next_message_from_memtable ()
+             | (Some _) as mo -> mo
+           end
+      in
+      let get_next () =
+        match get_next_message_from_memtable () with
+        | None -> get_next_message_from_sstable_tree ()
+        | (Some _) as mo -> mo
+      in
+      match get_next () with
+      | None ->
+         None
+      | Some m ->
+         m # merge_to_value ~get_next
+  end

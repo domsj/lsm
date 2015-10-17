@@ -7,7 +7,12 @@ class type t =
   object
     method merge_to_value : get_next : (unit -> t option) -> value option
     method merge_to_message : t list -> is_final -> t option * side_effect option
+
+    method show : string
   end
+
+let pp formatter t =
+  Format.pp_print_string formatter (t # show)
 
 (* let messages : (int, bytes -> int -> t) Hashtbl.t = Hashtbl.create 3 *)
 
@@ -26,12 +31,16 @@ class delete =
          then None
          else Some (self :> t)),
         None
+
+      method show = "delete"
     end : t)
 
 class set value =
   (object(self)
      method merge_to_value ~get_next = Some value
      method merge_to_message raws is_final = Some (self :> t), None
+
+     method show = Printf.sprintf "set %s" value
    end : t)
 
 class multi_message (messages : t list) =
@@ -54,6 +63,8 @@ class multi_message (messages : t list) =
 
       method merge_to_message raws is_final =
         Some (new multi_message (List.append messages raws)), None
+
+      method show = "multi_message"
     end : t)
 
 class int64_addition delta =
@@ -72,6 +83,8 @@ class int64_addition delta =
 
       method merge_to_message raws is_final =
         Some (new multi_message ((self :> t) :: raws)), None
+
+      method show = Printf.sprintf "int64 add %Li" delta
     end : t)
 
 (* let () = *)
