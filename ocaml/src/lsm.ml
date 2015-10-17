@@ -1,6 +1,6 @@
 type key = bytes
-type message = Message.t
-type value = Message.value
+type message = Lsm_message.t
+type value = Lsm_message.value
 
 type range = key * key option (* [ first_inclusive, last_exclusive [ *)
 
@@ -94,8 +94,16 @@ class map_memtable max_size =
         List.iter
           (function
             | Single (key, message) ->
-               map <- StringMap.add key message map
-          )
+               let map' = match self # get key with
+               | None -> StringMap.add key message map
+               | Some m ->
+                  begin
+                    match m # merge_to_message [ message ] false with
+                    | None, _ -> StringMap.remove key map
+                    | Some m, _ -> StringMap.add key m map
+                  end
+               in
+               map <- map')
           batch;
         size <- size + List.length batch
 
@@ -245,12 +253,12 @@ class lsm
 
       method set key value =
         self # apply
-             [ let open Message in
+             [ let open Lsm_message in
                Single (key, new set value); ]
 
       method delete key =
         self # apply
-             [ let open Message in
+             [ let open Lsm_message in
                Single (key, new delete); ]
 
       method get key : value option =

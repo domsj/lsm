@@ -9,14 +9,14 @@ class type t =
     method merge_to_message : t list -> is_final -> t option * side_effect option
   end
 
-let messages : (int, bytes -> int -> t) Hashtbl.t = Hashtbl.create 3
+(* let messages : (int, bytes -> int -> t) Hashtbl.t = Hashtbl.create 3 *)
 
-let register_message_type
-      code
-      from_bytes =
-  if Hashtbl.mem messages code
-  then failwith "bad code";
-  Hashtbl.add messages code from_bytes
+(* let register_message_type *)
+(*       code *)
+(*       from_bytes = *)
+(*   if Hashtbl.mem messages code *)
+(*   then failwith "bad code"; *)
+(*   Hashtbl.add messages code from_bytes *)
 
 class delete =
   (object(self)
@@ -35,24 +35,22 @@ class set value =
    end : t)
 
 class multi_message (messages : t list) =
-  let msg_o, msgs = match messages with
-    | [] -> None, ref []
-    | hd :: tl -> Some hd, ref tl
-  in
+  let () = assert (messages <> []) in
   (object
       method merge_to_value ~get_next =
-        let get_next' () =
-          match !msgs with
+        let get_next =
+          let messages = ref messages in
+          fun () ->
+          match !messages with
           | [] -> get_next ()
-          | op :: tl ->
-             msgs := tl;
-             Some op
+          | msg :: tl ->
+             messages := tl;
+             Some msg
         in
-        match (match msg_o with
-               | None -> get_next ()
-               | Some m -> Some m) with
+        match get_next () with
         | None -> None
-        | Some m -> m # merge_to_value get_next'
+        | Some msg ->
+           msg # merge_to_value ~get_next
 
       method merge_to_message raws is_final =
         Some (new multi_message (List.append messages raws)), None
@@ -76,12 +74,12 @@ class int64_addition delta =
         Some (new multi_message ((self :> t) :: raws)), None
     end : t)
 
-let () =
-  register_message_type
-    1 (Marshal.from_bytes : bytes -> int -> delete);
-  register_message_type
-    2 (Marshal.from_bytes : bytes -> int -> set);
-  register_message_type
-    3 (Marshal.from_bytes : bytes -> int -> multi_message);
-  register_message_type
-    4 (Marshal.from_bytes : bytes -> int -> int64_addition)
+(* let () = *)
+(*   register_message_type *)
+(*     1 (Marshal.from_bytes : bytes -> int -> delete); *)
+(*   register_message_type *)
+(*     2 (Marshal.from_bytes : bytes -> int -> set); *)
+(*   register_message_type *)
+(*     3 (Marshal.from_bytes : bytes -> int -> multi_message); *)
+(*   register_message_type *)
+(*     4 (Marshal.from_bytes : bytes -> int -> int64_addition) *)

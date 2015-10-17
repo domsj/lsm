@@ -1,5 +1,5 @@
 open Lsm
-open Message
+open Lsm_message
 
 module Option = struct
     let get_some = function
@@ -35,18 +35,20 @@ let test_memtable () =
                    ~get_next:(fun () -> None)
                  |> Option.get_some)
 
+let make_lsm () =
+  new lsm
+      (new mem_manifest_store
+           { next_counter = 0L;
+             sstables = []; })
+      (new no_wal)
+      (fun () -> new map_memtable 10)
+
 let test_lsm () =
-  let lsm = new lsm
-                (new mem_manifest_store
-                     { next_counter = 0L;
-                       sstables = []; })
-                (new no_wal)
-                (fun () -> new map_memtable 5)
-  in
+  let lsm = make_lsm () in
 
   let keys =
     Int.map
-      0 20
+      0 100
       (fun i -> Printf.sprintf "key_%i" i)
   in
   List.iter
@@ -66,6 +68,31 @@ let test_lsm () =
     (fun key -> assert (None = lsm # get key))
     keys
 
+let test_merge_messages () =
+  let lsm = make_lsm () in
+  (* push increment messages down the tree
+   * query after each step to see if the result
+   * is still as expected!
+   *)
+  let k = "key" in
+  let push_message () =
+    lsm # apply [ Single (k,
+                          new int64_addition 1L) ]
+  in
+  let get_int64 () =
+    match lsm # get k with
+    | None -> 0L
+    | Some v -> Marshal.from_bytes v 0
+  in
+  Int.iter
+    0 100
+    (fun i ->
+     let vi = get_int64 () in
+     Printf.printf "i = %i, vi = %Li\n" i vi;
+     assert (Int64.of_int i = vi);
+     push_message ())
+
 let () =
   test_memtable ();
-  test_lsm ()
+  test_lsm ();
+  test_merge_messages ()
