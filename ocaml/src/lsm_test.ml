@@ -9,8 +9,9 @@ let () =
                 (new no_wal)
                 (fun () -> new map_memtable)
   in
-  lsm # apply [ Single ("key", new set "value"); ];
-  assert (lsm # get "key" = Some "value");
-  lsm # apply [ Single ("key", new delete); ];
-  assert (lsm # get "key" = None);
+  let key = "key" in
+  lsm # set key "value";
+  assert (lsm # get key = Some "value");
+  lsm # delete key;
+  assert (lsm # get key = None);
   print_endline "cucu"

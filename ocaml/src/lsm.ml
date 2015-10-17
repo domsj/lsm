@@ -202,6 +202,9 @@ class type lsm_type =
   object
     inherit writeable
 
+    method set : key -> value -> unit
+    method delete : key -> unit
+
     method get : key -> value option
 
     (* TODO allow making snapshots etc *)
@@ -212,7 +215,7 @@ class lsm
         (wal : wal)
         (make_memtable : unit -> memtable)
   =
-  (object
+  (object(self)
       val mutable active_memtable = make_memtable ()
 
       (* TODO background threads
@@ -226,6 +229,16 @@ class lsm
         (* TODO check size of memtable,
          * maybe freeze current and start new one *)
         active_memtable # apply batch
+
+      method set key value =
+        self # apply
+             [ let open Message in
+               Single ("key", new set "value"); ]
+
+      method delete key =
+        self # apply
+             [ let open Message in
+               Single ("key", new delete); ]
 
       method get key : value option =
         let get_next_from_sstable_tree =
