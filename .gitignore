@@ -1,2 +1,3 @@
 /ocaml/_build/
 /ocaml/*.native
+*.native

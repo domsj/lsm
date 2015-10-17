@@ -121,16 +121,57 @@ class map_memtable =
 class type sstable =
   object
     inherit queryable
+
+    method key_range : key * key
   end
 
-type 'a partitioned = 'a * (key * 'a) list
-type sstable_node =
-  | Empty
-  | Node of sstable * sstable_node partitioned
+(* all sstables in a level should be not overlapping
+ * sstables are sorted in key-range order
+ *)
+type sstable_level = sstable array
+
+let get_sstable_from_level level key =
+  (* TODO could use binary search *)
+  let rec inner i =
+    if i = Array.length level
+    then None
+    else
+      begin
+        let sstable = level.(i) in
+        let min, max = sstable # key_range in
+        if key > max
+        then inner (i + 1)
+        else
+          if key < min
+          then None
+          else Some sstable
+      end
+  in
+  inner 0
+
+
+(* most recent level is at the head of the list
+ * oldest level is at the tail of the list
+ * new levels are added to the front
+ *)
+type sstable_tree = sstable_level list
+
+(* TODO
+want cached (precomputed) view based on sstable_tree
+- per key range have the list of relevant sstables
+=> used for point queries and range queries
+=> used by the scheduler to see which key ranges
+   are most in need of compaction
+   (to keep cost of range queries down)
+   (compaction to keep cost of point queries
+    low should be decided based upon
+    hyperloglog info of overlapping levels?)
+ *)
+
 
 type manifest = {
     next_counter : counter;
-    sstable_dag : sstable_node;
+    sstables : sstable_tree;
   }
 
 (* manifest + wal = persisted lsm state *)
@@ -181,24 +222,21 @@ class lsm
         match active_memtable # get key with
         | (Some _) as vo -> vo
         | None ->
-           let rec walk_sstable = function
-             | Empty -> None
-             | Node (sstable, sharded_sstables) ->
+           let rec walk_sstable_tree = function
+             | [] -> None
+             | level :: levels ->
                 begin
-                  match sstable # get key with
-                  | (Some _) as vo -> vo
-                  | None ->
-                     let rec inner = function
-                       | (prev, []) -> prev
-                       | (prev, ((key', sstable') :: tl)) ->
-                          if key < key'
-                          then prev
-                          else inner (sstable', tl)
-                     in
-                     walk_sstable (inner sharded_sstables)
+                  match get_sstable_from_level level key with
+                  | None -> walk_sstable_tree levels
+                  | Some sstable ->
+                     begin
+                       match sstable # get key with
+                       | (Some _) as vo -> vo
+                       | None -> walk_sstable_tree levels
+                     end
                 end
            in
-           walk_sstable (manifest_store # get).sstable_dag
+           walk_sstable_tree (manifest_store # get).sstables
 
     end : lsm_type)
 
@@ -207,7 +245,7 @@ let () =
   let lsm = new lsm
                 (new mem_manifest_store
                      { next_counter = 0L;
-                       sstable_dag = Empty; })
+                       sstables = []; })
                 (new no_wal)
                 (fun () -> new map_memtable)
   in
