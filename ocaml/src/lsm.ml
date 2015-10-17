@@ -1,20 +1,12 @@
 type key = bytes
-
-(* raw_value may contain
- * an actual value, a delete marker
- * or a merge message.
- * so it's presence doesn't mean there's an
- * actual value as far as the user is concerned
- *)
-type raw_value = bytes
-
-open Message
+type message = Message.t
+type value = Message.value
 
 type range = key * key option (* [ first_inclusive, last_exclusive [ *)
 
 type operation =
-  | Single of key * raw_value
-  (* | TODO Range of range * raw_value *)
+  | Single of key * message
+  (* | TODO Range of range * message *)
 
 
 (* TODO
@@ -45,29 +37,29 @@ class no_wal =
     end : wal)
 
 
-type direction =
-  | LE (* less than or equal *)
-  | GE (* greater than or equal *)
+(* type direction = *)
+(*   | LE (\* less than or equal *\) *)
+(*   | GE (\* greater than or equal *\) *)
 
-class type iterator =
-  object
-    method is_valid : bool
+(* class type iterator = *)
+(*   object *)
+(*     method is_valid : bool *)
 
-    method jump : key -> direction -> bool
-    method jump_to_last : bool
+(*     method jump : key -> direction -> bool *)
+(*     method jump_to_last : bool *)
 
-    method next : bool
-    method prev : bool
+(*     method next : bool *)
+(*     method prev : bool *)
 
-    method get_key : key option
-    method get_value : raw_value option
-  end
+(*     method get_key : key option *)
+(*     method get_value : raw_value option *)
+(*   end *)
 
 
 class type queryable =
   object
     (* method maybe_exists : key -> bool *)
-    method get : key -> raw_value option
+    method get : key -> message option
     (* TODO method get_iterator : iterator *)
   end
 
@@ -104,8 +96,8 @@ class map_memtable =
         then raise Immutable_memtable;
         List.iter
           (function
-            | Single (key, raw_value) ->
-               map <- StringMap.add key raw_value map
+            | Single (key, message) ->
+               map <- StringMap.add key message map
           )
           batch
 
@@ -156,6 +148,22 @@ let get_sstable_from_level level key =
  *)
 type sstable_tree = sstable_level list
 
+let get_next_from_sstable_tree levels key =
+  let levels = ref levels in
+  let rec inner () = match !levels with
+    | [] -> None
+    | level :: tl ->
+       levels := tl;
+       begin
+         match get_sstable_from_level level key with
+         | None ->
+            inner ()
+         | Some sstable ->
+            sstable # get key
+       end
+  in
+  inner
+
 (* TODO
 want cached (precomputed) view based on sstable_tree
 - per key range have the list of relevant sstables
@@ -193,7 +201,8 @@ class mem_manifest_store current_manifest =
 class type lsm_type =
   object
     inherit writeable
-    inherit queryable
+
+    method get : key -> value option
 
     (* TODO allow making snapshots etc *)
   end
@@ -218,37 +227,21 @@ class lsm
          * maybe freeze current and start new one *)
         active_memtable # apply batch
 
-      method get key =
+      method get key : value option =
+        let get_next_from_sstable_tree =
+          get_next_from_sstable_tree
+            (manifest_store # get).sstables
+            key
+        in
         match active_memtable # get key with
-        | (Some _) as vo -> vo
+        | Some message ->
+           message # merge_to_value get_next_from_sstable_tree
         | None ->
-           let rec walk_sstable_tree = function
-             | [] -> None
-             | level :: levels ->
-                begin
-                  match get_sstable_from_level level key with
-                  | None -> walk_sstable_tree levels
-                  | Some sstable ->
-                     begin
-                       match sstable # get key with
-                       | (Some _) as vo -> vo
-                       | None -> walk_sstable_tree levels
-                     end
-                end
-           in
-           walk_sstable_tree (manifest_store # get).sstables
+           begin
+             match get_next_from_sstable_tree () with
+             | None -> None
+             | Some m ->
+                m # merge_to_value get_next_from_sstable_tree
+           end
 
     end : lsm_type)
-
-(* TODO add tests *)
-let () =
-  let lsm = new lsm
-                (new mem_manifest_store
-                     { next_counter = 0L;
-                       sstables = []; })
-                (new no_wal)
-                (fun () -> new map_memtable)
-  in
-  lsm # apply [ Single ("key", "value"); ];
-  assert (lsm # get "key" = Some "value");
-  print_endline "cucu"

@@ -1,17 +1,15 @@
-type t = bytes
-
 type value = bytes
 
 type side_effect = bytes
 type is_final = bool
 
-class type message =
+class type t =
   object
-    method merge_to_value : get_next : (unit -> message option) -> value option
-    method merge_to_message : message list -> is_final -> message option * side_effect option
+    method merge_to_value : get_next : (unit -> t option) -> value option
+    method merge_to_message : t list -> is_final -> t option * side_effect option
   end
 
-let messages : (int, bytes -> int -> message) Hashtbl.t = Hashtbl.create 3
+let messages : (int, bytes -> int -> t) Hashtbl.t = Hashtbl.create 3
 
 let register_message_type
       code
@@ -26,17 +24,17 @@ class delete =
       method merge_to_message raws is_final =
         (if is_final
          then None
-         else Some (self :> message)),
+         else Some (self :> t)),
         None
-    end : message)
+    end : t)
 
 class set value =
   (object(self)
       method merge_to_value ~get_next = Some value
-      method merge_to_message raws is_final = Some (self :> message), None
-    end : message)
+      method merge_to_message raws is_final = Some (self :> t), None
+    end : t)
 
-class multi_message (messages : message list) =
+class multi_message (messages : t list) =
   let msg_o, msgs = match messages with
     | [] -> None, ref []
     | hd :: tl -> Some hd, ref tl
@@ -58,7 +56,7 @@ class multi_message (messages : message list) =
 
       method merge_to_message raws is_final =
         Some (new multi_message (List.append messages raws)), None
-    end : message)
+    end : t)
 
 class int64_addition delta =
   (object(self)
@@ -75,8 +73,8 @@ class int64_addition delta =
         Some (Marshal.to_bytes Int64.(add cur delta) [])
 
       method merge_to_message raws is_final =
-        Some (new multi_message ((self :> message) :: raws)), None
-    end : message)
+        Some (new multi_message ((self :> t) :: raws)), None
+    end : t)
 
 let () =
   register_message_type
