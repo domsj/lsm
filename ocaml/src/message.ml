@@ -30,9 +30,9 @@ class delete =
 
 class set value =
   (object(self)
-      method merge_to_value ~get_next = Some value
-      method merge_to_message raws is_final = Some (self :> t), None
-    end : t)
+     method merge_to_value ~get_next = Some value
+     method merge_to_message raws is_final = Some (self :> t), None
+   end : t)
 
 class multi_message (messages : t list) =
   let msg_o, msgs = match messages with

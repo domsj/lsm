@@ -14,12 +14,6 @@ type operation =
  *)
 type batch = operation list
 
-
-class type writeable =
-  object
-    method apply : batch -> unit
-  end
-
 type counter = int64
 
 class type wal =
@@ -55,7 +49,6 @@ class no_wal =
 (*     method get_value : raw_value option *)
 (*   end *)
 
-
 class type queryable =
   object
     (* method maybe_exists : key -> bool *)
@@ -63,18 +56,20 @@ class type queryable =
     (* TODO method get_iterator : iterator *)
   end
 
-
 exception Immutable_memtable
 
 class type memtable =
   object
-    (* TODO
-     * - allow requesting size so that caller can choose to write
-     *   to this memtable or freeze it and start a new one
-     * - allow flushing to a sstable
+    (* force apply batch even if it's too big
+     * note: will only be called on a fresh memtable
      *)
+    method force_apply : batch -> unit
 
-    inherit writeable
+    (* apply batch if it fits in,
+     * returns whether it was applied or not
+     *)
+    method maybe_apply : batch -> bool
+
     inherit queryable
 
     (* turns the memtable into an immutable one *)
@@ -84,22 +79,34 @@ class type memtable =
 
 module StringMap = Map.Make(String)
 
-class map_memtable =
-  (object
+class map_memtable max_size =
+  (object(self)
+      val mutable size = 0
       val mutable frozen = false
-      method freeze = frozen <- true
-
       val mutable map = StringMap.empty
 
-      method apply batch =
+      method freeze = frozen <- true
+
+      method force_apply batch =
         if frozen
         then raise Immutable_memtable;
+
         List.iter
           (function
             | Single (key, message) ->
                map <- StringMap.add key message map
           )
-          batch
+          batch;
+        size <- size + List.length batch
+
+      method maybe_apply batch =
+        if size + (List.length batch) > max_size
+        then false
+        else
+          begin
+            self # force_apply batch;
+            true
+          end
 
       (* method maybe_exists key = *)
       (*   StringMap.mem key map *)
@@ -148,7 +155,7 @@ let get_sstable_from_level level key =
  *)
 type sstable_tree = sstable_level list
 
-let get_next_from_sstable_tree levels key =
+let get_next_message_from_sstable_tree levels key =
   let levels = ref levels in
   let rec inner () = match !levels with
     | [] -> None
@@ -200,7 +207,7 @@ class mem_manifest_store current_manifest =
 
 class type lsm_type =
   object
-    inherit writeable
+    method apply : batch -> unit
 
     method set : key -> value -> unit
     method delete : key -> unit
@@ -217,6 +224,7 @@ class lsm
   =
   (object(self)
       val mutable active_memtable = make_memtable ()
+      val mutable frozen_memtables = []
 
       (* TODO background threads
        * - to schedule compaction
@@ -226,35 +234,60 @@ class lsm
        *)
 
       method apply batch =
-        (* TODO check size of memtable,
-         * maybe freeze current and start new one *)
-        active_memtable # apply batch
+        if not (active_memtable # maybe_apply batch)
+        then
+          begin
+            active_memtable # freeze;
+            frozen_memtables <- active_memtable :: frozen_memtables;
+            active_memtable <- make_memtable ();
+            active_memtable # force_apply batch
+          end
 
       method set key value =
         self # apply
              [ let open Message in
-               Single ("key", new set "value"); ]
+               Single (key, new set value); ]
 
       method delete key =
         self # apply
              [ let open Message in
-               Single ("key", new delete); ]
+               Single (key, new delete); ]
 
       method get key : value option =
-        let get_next_from_sstable_tree =
-          get_next_from_sstable_tree
+        let get_next_message_from_sstable_tree =
+          get_next_message_from_sstable_tree
             (manifest_store # get).sstables
             key
         in
-        match active_memtable # get key with
-        | Some message ->
-           message # merge_to_value get_next_from_sstable_tree
+        let get_next_memtable =
+          let memtables =
+            ref (active_memtable :: frozen_memtables) in
+          fun () ->
+          match !memtables with
+          | [] -> None
+          | t :: ts ->
+             memtables := ts;
+             Some t
+        in
+        let rec get_next_message_from_memtable () =
+          match get_next_memtable () with
+          | None -> None
+          | Some memtable ->
+             begin
+               match memtable # get key with
+               | None -> get_next_message_from_memtable ()
+               | (Some _) as mo -> mo
+             end
+        in
+        let get_next () =
+          match get_next_message_from_memtable () with
+          | None -> get_next_message_from_sstable_tree ()
+          | (Some _) as mo -> mo
+        in
+        match get_next () with
         | None ->
-           begin
-             match get_next_from_sstable_tree () with
-             | None -> None
-             | Some m ->
-                m # merge_to_value get_next_from_sstable_tree
-           end
+           None
+        | Some m ->
+           m # merge_to_value ~get_next
 
     end : lsm_type)
